@@ -1,0 +1,222 @@
+--- a/build/config/jumbo.gni  2020-04-11 19:11:51.979131201 +0200
++++ b/build/config/jumbo.gni  2020-04-11 19:17:26.472451060 +0200
+@@ -6,18 +6,42 @@
+ import("//build/toolchain/goma.gni")
+ 
+ declare_args() {
++  # If true, use a jumbo build (files compiled together) to speed up
++  # compilation.
+   use_jumbo_build = false
++
++  # A list of build targets to exclude from jumbo builds, for optimal
++  # round trip time when frequently changing a set of cpp files. The
++  # targets can be just the short name (in which case it matches any
++  # target with that name), a directory prefixed with the root
++  # specifier //, or a full build target label.
++  #
++  # Example:
++  # These would all exclude the "browser" target in a file
++  # content/browser/BUILD.gn, and potentially more.
++  #
++  # jumbo_build_excluded = [ "browser" ]
++  # jumbo_build_excluded = [ "//content/browser" ]
++  # jumbo_build_excluded = [ "//content/browser:browser" ]
+   jumbo_build_excluded = []
++
++  # How many files to group on average. Smaller numbers give more
++  # parallellism, higher numbers give less total CPU usage. Higher
++  # numbers also give longer single-file recompilation times.
++  #
++  # Recommendations:
++  # Higher numbers than 100 does not reduce wall clock compile times
++  # even for 4 cores or less so no reason to go higher than 100.
++  # Going from 50 to 100 with a 4 core CPU saves about 3% CPU time and
++  # 3% wall clock time in a tree with blink, v8 and content
++  # jumbofied. At the same time it increases the compile time for the
++  # largest jumbo chunks by 10-20% and reduces the chance to use all
++  # available CPU cores. So set the default to 50 to balance between
++  # high and low-core build performance. -1 means do the default which
++  # varies depending on whether goma is enabled.
+   jumbo_file_merge_limit = -1
+ }
+ 
+-# TODO(crbug.com/994387): Remove all uses of the jumbo_* templates from the
+-# BUILD.gn files, and then remove this whole file.
+-assert(!use_jumbo_build,
+-       "The jumbo build is no longer supported. Please remove any uses of " +
+-           "'use_jumbo_build', 'jumbo_build_excluded', or " +
+-           "'jumbo_file_merge_limit' from your args.gn file and re-run GN.")
+-
+ # Normal builds benefit from lots of jumbification
+ jumbo_file_merge_default = 50
+
+--- a/v8/gni/v8.gni   2020-04-11 19:11:32.232465323 +0200
++++ b/v8/gni/v8.gni   2020-04-11 19:56:48.159023051 +0200
+@@ -2,6 +2,7 @@
+ # Use of this source code is governed by a BSD-style license that can be
+ # found in the LICENSE file.
+ 
++import("//build/config/jumbo.gni")
+ import("//build/config/sanitizers/sanitizers.gni")
+ import("//build/config/v8_target_cpu.gni")
+ import("split_static_library.gni")
+@@ -70,7 +71,7 @@
+   # build configuration. This allows us to set v8_use_multi_snapshots=true on
+   # all bots, and e.g. no-snapshot bots will automatically do the right thing.
+   v8_use_multi_snapshots =
+-      v8_use_external_startup_data && !build_with_chromium
++      v8_use_external_startup_data && !build_with_chromium && !use_jumbo_build
+ }
+ 
+ if (v8_enable_backtrace == "") {
+@@ -139,9 +140,9 @@
+       defined(v8_static_library) && v8_static_library && is_win) {
+     link_target_type = "split_static_library"
+   } else if (defined(v8_static_library) && v8_static_library) {
+-    link_target_type = "static_library"
++    link_target_type = "jumbo_static_library"
+   } else {
+-    link_target_type = "source_set"
++    link_target_type = "jumbo_source_set"
+   }
+   target(link_target_type, target_name) {
+     forward_variables_from(invoker,
+@@ -160,7 +161,7 @@
+ }
+ 
+ template("v8_header_set") {
+-  source_set(target_name) {
++  jumbo_source_set(target_name) {
+     forward_variables_from(invoker, "*", [ "configs" ])
+     configs -= v8_remove_configs
+     configs += v8_add_configs
+--- a/third_party/blink/renderer/platform/fonts/font_matching_metrics.cc 2020-04-11 19:11:33.505798604 +0200
++++ b/third_party/blink/renderer/platform/fonts/font_matching_metrics.cc 2020-04-11 20:31:54.822271813 +0200
+@@ -15,7 +15,7 @@
+ enum FontLoadContext { kTopLevel = 0, kSubFrame };
+
+ template <typename T>
+-HashSet<T> Intersection(const HashSet<T>& a, const HashSet<T>& b) {
++HashSet<T> HSIntersection(const HashSet<T>& a, const HashSet<T>& b) {
+   HashSet<T> result;
+   for (const T& a_value : a) {
+     if (b.Contains(a_value))
+@@ -52,16 +52,16 @@
+   ukm::builders::FontMatchAttempts(source_id_)
+       .SetLoadContext(top_level_ ? kTopLevel : kSubFrame)
+       .SetSystemFontFamilySuccesses(ukm::GetExponentialBucketMin(
+-          Intersection(successful_font_families_, system_font_families_).size(),
++          HSIntersection(successful_font_families_, system_font_families_).size(),
+           kUkmFontLoadCountBucketSpacing))
+       .SetSystemFontFamilyFailures(ukm::GetExponentialBucketMin(
+-          Intersection(failed_font_families_, system_font_families_).size(),
++          HSIntersection(failed_font_families_, system_font_families_).size(),
+           kUkmFontLoadCountBucketSpacing))
+       .SetWebFontFamilySuccesses(ukm::GetExponentialBucketMin(
+-          Intersection(successful_font_families_, web_font_families_).size(),
++          HSIntersection(successful_font_families_, web_font_families_).size(),
+           kUkmFontLoadCountBucketSpacing))
+       .SetWebFontFamilyFailures(ukm::GetExponentialBucketMin(
+-          Intersection(failed_font_families_, web_font_families_).size(),
++          HSIntersection(failed_font_families_, web_font_families_).size(),
+           kUkmFontLoadCountBucketSpacing))
+       .Record(ukm_recorder_);
+ }
+--- a/storage/browser/quota/quota_settings.cc 2020-04-11 19:11:56.809131010 +0200
++++ b/storage/browser/quota/quota_settings.cc 2020-04-11 21:16:14.728831862 +0200
+@@ -21,7 +21,7 @@
+ 
+ namespace {
+ 
+-const int64_t kMBytes = 1024 * 1024;
++const int64_t QSkMBytes = 1024 * 1024;
+ const int kRandomizedPercentage = 10;
+ 
+ // Skews |value| by +/- |percent|.
+@@ -35,7 +35,7 @@
+   // The incognito pool size is a fraction of the amount of system memory,
+   // and the amount is capped to a hard limit.
+   double incognito_pool_size_ratio = 0.1;  // 10%
+-  int64_t max_incognito_pool_size = 300 * kMBytes;
++  int64_t max_incognito_pool_size = 300 * QSkMBytes;
+   if (base::FeatureList::IsEnabled(features::kIncognitoDynamicQuota)) {
+     const double lower_bound = features::kIncognitoQuotaRatioLowerBound.Get();
+     const double upper_bound = features::kIncognitoQuotaRatioUpperBound.Get();
+--- a/chrome/browser/performance_manager/decorators/process_priority_aggregator.cc       2020-04-11 19:11:54.455797767 +0200
++++ b/chrome/browser/performance_manager/decorators/process_priority_aggregator.cc    2020-04-11 21:39:36.945442260 +0200
+@@ -22,15 +22,15 @@
+ 
+ namespace {
+ 
+-class DataImpl : public ProcessPriorityAggregator::Data,
+-                 public NodeAttachedDataImpl<DataImpl> {
++class PPADataImpl : public ProcessPriorityAggregator::Data,
++                 public NodeAttachedPPADataImpl<PPADataImpl> {
+  public:
+   using StorageType = ProcessPriorityAggregatorAccess::StorageType;
+ 
+   struct Traits : public NodeAttachedDataOwnedByNodeType<ProcessNodeImpl> {};
+ 
+-  explicit DataImpl(const ProcessNode* process_node) {}
+-  ~DataImpl() override {}
++  explicit PPADataImpl(const ProcessNode* process_node) {}
++  ~PPADataImpl() override {}
+ 
+   static std::unique_ptr<NodeAttachedData>* GetUniquePtrStorage(
+       ProcessNodeImpl* process_node) {
+@@ -106,7 +106,7 @@
+ // static
+ ProcessPriorityAggregator::Data* ProcessPriorityAggregator::Data::GetForTesting(
+     ProcessNodeImpl* process_node) {
+-  return DataImpl::Get(process_node);
++  return PPADataImpl::Get(process_node);
+ }
+ 
+ ProcessPriorityAggregator::ProcessPriorityAggregator() = default;
+@@ -114,7 +114,7 @@
+ 
+ void ProcessPriorityAggregator::OnFrameNodeAdded(const FrameNode* frame_node) {
+   auto* process_node = ProcessNodeImpl::FromNode(frame_node->GetProcessNode());
+-  DataImpl* data = DataImpl::Get(process_node);
++  PPADataImpl* data = PPADataImpl::Get(process_node);
+   data->Increment(frame_node->GetPriorityAndReason().priority());
+   // This is a nop if the priority didn't actually change.
+   process_node->set_priority(data->GetPriority());
+@@ -123,7 +123,7 @@
+ void ProcessPriorityAggregator::OnBeforeFrameNodeRemoved(
+     const FrameNode* frame_node) {
+   auto* process_node = ProcessNodeImpl::FromNode(frame_node->GetProcessNode());
+-  DataImpl* data = DataImpl::Get(process_node);
++  PPADataImpl* data = PPADataImpl::Get(process_node);
+   data->Decrement(frame_node->GetPriorityAndReason().priority());
+   // This is a nop if the priority didn't actually change.
+   process_node->set_priority(data->GetPriority());
+@@ -140,7 +140,7 @@
+   // Update the distinct frame priority counts, and set the process priority
+   // accordingly.
+   auto* process_node = ProcessNodeImpl::FromNode(frame_node->GetProcessNode());
+-  DataImpl* data = DataImpl::Get(process_node);
++  PPADataImpl* data = PPADataImpl::Get(process_node);
+   data->Decrement(previous_value.priority());
+   data->Increment(new_value.priority());
+   // This is a nop if the priority didn't actually change.
+@@ -160,8 +160,8 @@
+ void ProcessPriorityAggregator::OnProcessNodeAdded(
+     const ProcessNode* process_node) {
+   auto* process_node_impl = ProcessNodeImpl::FromNode(process_node);
+-  DCHECK(!DataImpl::Get(process_node_impl));
+-  DataImpl* data = DataImpl::GetOrCreate(process_node_impl);
++  DCHECK(!PPADataImpl::Get(process_node_impl));
++  PPADataImpl* data = PPADataImpl::GetOrCreate(process_node_impl);
+   DCHECK(data->IsEmpty());
+   DCHECK_EQ(base::TaskPriority::LOWEST, process_node_impl->priority());
+   DCHECK_EQ(base::TaskPriority::LOWEST, data->GetPriority());
+@@ -171,7 +171,7 @@
+     const ProcessNode* process_node) {
+ #if DCHECK_IS_ON()
+   auto* process_node_impl = ProcessNodeImpl::FromNode(process_node);
+-  DataImpl* data = DataImpl::Get(process_node_impl);
++  PPADataImpl* data = PPADataImpl::Get(process_node_impl);
+   DCHECK(data->IsEmpty());
+ #endif
+ }
